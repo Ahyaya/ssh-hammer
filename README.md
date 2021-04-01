@@ -1,2 +1,5 @@
-# ssh-hammer
-Lite tool for ssh attack, can be used without install (no need for sudo)
+Dependency: libssh2 libssh2-devel
+(it is tested on CentOS)
+
+compile with:
+gcc ssh-hammer.c -lssh2 -lpthread -o ssh-hammer
